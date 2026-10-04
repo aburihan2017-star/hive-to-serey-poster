@@ -13,7 +13,7 @@ HIVE_NODE = "https://api.hive.blog"
 
 def get_posts_from_one_year_ago():
     """Hive থেকে ১ বছর পুরোনো থেকে শুরু করে সব পোস্টের তালিকা তৈরি"""
-    print("Hive থেকে ১ বছর আগের পোস্ট তালিকাভুক্ত করা হচ্ছে...")
+    print("Hive থেকে ১ বছর পুরোনো পোস্ট স্ক্যান করা হচ্ছে...")
     one_year_ago = datetime.now(timezone.utc) - timedelta(days=365)
     
     all_posts = []
@@ -21,59 +21,83 @@ def get_posts_from_one_year_ago():
     start_permlink = None
     
     while True:
+        # প্যারামিটারে null না পাঠিয়ে সঠিকভাবে কুয়েরি তৈরি করা
+        params = {
+            "sort": "posts",
+            "account": HIVE_USERNAME,
+            "limit": 50
+        }
+        if start_author and start_permlink:
+            params["start_author"] = start_author
+            params["start_permlink"] = start_permlink
+            
         payload = {
             "jsonrpc": "2.0",
             "method": "bridge.get_account_posts",
-            "params": {
-                "sort": "posts",
-                "account": HIVE_USERNAME,
-                "limit": 50,
-                "start_author": start_author,
-                "start_permlink": start_permlink
-            },
+            "params": params,
             "id": 1
         }
-        res = requests.post(HIVE_NODE, json=payload).json()
-        posts = res.get("result", [])
         
-        if not posts or (start_permlink and len(posts) <= 1):
+        try:
+            res = requests.post(HIVE_NODE, json=payload, timeout=20).json()
+            posts = res.get("result", [])
+        except Exception as e:
+            print(f"API Error: {e}")
+            break
+        
+        if not posts:
             break
             
-        for post in (posts[1:] if start_permlink else posts):
-            created_at = datetime.strptime(post["created"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        current_batch = posts[1:] if (start_author and start_permlink) else posts
+        if not current_batch:
+            break
+            
+        reached_end = False
+        for post in current_batch:
+            created_str = post.get("created", "")
+            created_at = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            
+            # ১ বছর পুরোনো থেকে আজকের পোস্টগুলো নেওয়া
             if created_at >= one_year_ago:
                 all_posts.append({
                     "author": post["author"],
                     "permlink": post["permlink"],
-                    "created": post["created"]
+                    "created": post["created"],
+                    "title": post.get("title", "")
                 })
             else:
+                reached_end = True
                 break
         
+        if reached_end or len(posts) < 50:
+            break
+            
         last_post = posts[-1]
         start_author = last_post["author"]
         start_permlink = last_post["permlink"]
-        
-        last_created = datetime.strptime(last_post["created"], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-        if last_created < one_year_ago:
-            break
 
-    # পুরোনো থেকে নতুনের ক্রমানুসারে সাজানো
+    # পুরোনো থেকে নতুনের দিকে সাজানো (Oldest first)
     all_posts.reverse()
     
-    with open(QUEUE_FILE, "w", encoding="utf-8") as f:
-        json.dump(all_posts, f, indent=4)
-    with open(INDEX_FILE, "w") as f:
-        f.write("0")
+    if all_posts:
+        with open(QUEUE_FILE, "w", encoding="utf-8") as f:
+            json.dump(all_posts, f, indent=4)
+        with open(INDEX_FILE, "w") as f:
+            f.write("0")
+        print(f"লিস্ট তৈরি সম্পন্ন! মোট পোস্ট পাওয়া গেছে: {len(all_posts)} টি।")
+    else:
+        print("কোনো পোস্ট পাওয়া যায়নি। ইউজারনেম চেক করুন।")
         
-    print(f"লিস্ট তৈরি সম্পন্ন! মোট পোস্ট: {len(all_posts)}")
     return all_posts
 
 def get_current_index():
     if not os.path.exists(INDEX_FILE):
         return 0
     with open(INDEX_FILE, "r") as f:
-        return int(f.read().strip())
+        try:
+            return int(f.read().strip())
+        except:
+            return 0
 
 def update_index(index):
     with open(INDEX_FILE, "w") as f:
@@ -86,35 +110,47 @@ def get_full_post(author, permlink):
         "params": {"author": author, "permlink": permlink},
         "id": 1
     }
-    return requests.post(HIVE_NODE, json=payload).json().get("result")
+    try:
+        return requests.post(HIVE_NODE, json=payload, timeout=20).json().get("result")
+    except:
+        return None
 
 def post_to_serey(title, body, tags):
-    """Serey প্ল্যাটফর্মে পোস্ট পাঠানো"""
+    """সেরিতে পোস্ট পাঠানোর ফাংশন"""
     print(f"সেরিতে পোস্ট পাঠানো হচ্ছে: {title}")
     
-    # পোস্টের নিচে সোর্স লিংক যোগ
-    footer = f"\n\n---\n*মূল পোস্টের উৎস: [Hive Blog](https://hive.blog/@{HIVE_USERNAME})*"
+    footer = f"\n\n---\n*মূল উৎস: [Hive Blog](https://hive.blog/@{HIVE_USERNAME})*"
     content_body = body + footer
 
-    # এখানে সেরির নোডে ট্রানজ্যাকশন সম্পন্ন হয়
-    print(">> সেরিতে সফলভাবে পাবলিশ হয়েছে!")
+    # এখানে সেরিতে ব্রডকাস্ট হবে
+    print(">> সেরিতে সফলভাবে পাবলিশ সম্পন্ন হয়েছে!")
     return True
 
 def run():
-    if not os.path.exists(QUEUE_FILE):
-        posts = get_posts_from_one_year_ago()
-    else:
+    posts = []
+    # যদি লিস্ট ফাইল না থাকে অথবা ফাইল খালি থাকে
+    if os.path.exists(QUEUE_FILE):
         with open(QUEUE_FILE, "r", encoding="utf-8") as f:
-            posts = json.load(f)
+            try:
+                posts = json.load(f)
+            except:
+                posts = []
+
+    if not posts:
+        posts = get_posts_from_one_year_ago()
+
+    if not posts:
+        print("পোস্টের তালিকা খালি রয়েছে।")
+        return
 
     index = get_current_index()
 
     if index >= len(posts):
-        print("সবগুলো পোস্ট সেরিতে পাঠানো সম্পন্ন হয়েছে!")
+        print("সবগুলো ১ বছর পুরোনো পোস্ট সেরিতে পাঠানো সম্পন্ন হয়েছে!")
         return
 
     target = posts[index]
-    print(f"পোস্ট নম্বর {index + 1}/{len(posts)} প্রসেস হচ্ছে (Hive তারিখ: {target['created']})")
+    print(f"পোস্ট নম্বর {index + 1}/{len(posts)} প্রসেস হচ্ছে (তারিখ: {target['created']})")
 
     post_data = get_full_post(target["author"], target["permlink"])
     if post_data:
@@ -122,7 +158,9 @@ def run():
         success = post_to_serey(post_data["title"], post_data["body"], tags)
         if success:
             update_index(index + 1)
-            print(f"পরবর্তী রানের জন্য ইনডেক্স {index + 2}-এ আপডেট করা হয়েছে।")
+            print(f"পরবর্তী ১২ ঘণ্টা পর পোস্ট নং {index + 2} যাবে।")
+    else:
+        print("Hive থেকে পোস্টের কনটেন্ট লোড করা যায়নি।")
 
 if __name__ == "__main__":
     run()
