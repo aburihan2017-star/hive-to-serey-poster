@@ -1,0 +1,35 @@
+name: 12-Hour Auto Poster
+
+on:
+  schedule:
+    # বাংলাদেশ সময় সকাল ৬টা এবং সন্ধ্যা ৬টায় (UTC 00:00 ও 12:00) নিজে থেকেই রান হবে
+    - cron: '0 0,12 * * *'
+  workflow_dispatch: # যাতে চাইলে নিজেও টেস্ট বাটনে চাপ দিয়ে চালাতে পারেন
+
+jobs:
+  run-poster:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code Checkout
+        uses: actions/checkout@v3
+
+      - name: Python Setup
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Requirements
+        run: pip install -r requirements.txt
+
+      - name: Run Script
+        env:
+          SEREY_POSTING_KEY: ${{ secrets.SEREY_POSTING_KEY }}
+        run: python poster.py
+
+      - name: Save State Files
+        run: |
+          git config --global user.name "AutoPosterBot"
+          git config --global user.email "bot@github.com"
+          git add posts_queue.json current_index.txt
+          git commit -m "Auto update post index [skip ci]" || exit 0
+          git push
