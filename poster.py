@@ -22,6 +22,7 @@ SYNC_FILE = "synced_posts.json"
 POSTS_PER_RUN = 1
 DAYS_LIMIT = 365
 
+# Hive ব্যাকআপ RPC নোড তালিকা
 HIVE_NODES = [
     "https://api.hive.blog",
     "https://api.openhive.network",
@@ -44,12 +45,11 @@ def rpc(method, params):
             r = requests.post(node, json=payload, headers=HEADERS, timeout=20)
             r.raise_for_status()
             data = r.json()
-            if "error" in data:
-                continue
-            return data.get("result")
+            if "result" in data and data["result"] is not None:
+                return data["result"]
         except Exception:
             pass
-    raise Exception("All Hive RPC nodes failed")
+    return None
 
 # ============================================================
 # SYNC FILE
@@ -78,7 +78,7 @@ def save_synced(data):
 def format_body_and_thumbnail(body, metadata):
     thumbnail = None
     try:
-        meta = json.loads(metadata or "{}") if isinstance(metadata, str) else (metadata or {})
+        meta = metadata if isinstance(metadata, dict) else json.loads(metadata or "{}")
         images = meta.get("image", [])
         if isinstance(images, list) and images:
             thumbnail = images[0]
@@ -120,25 +120,19 @@ def get_posts():
     print(f"Collecting Hive posts for @{HIVE_USERNAME} (last {DAYS_LIMIT} days)...", flush=True)
     print(f"Cut-off date: {cutoff.strftime('%Y-%m-%d')}", flush=True)
 
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-
     while len(posts) < 3000 and not reached_old:
-        try:
-            res = rpc("condenser_api.get_discussions_by_author_before_date", [HIVE_USERNAME, start_permlink or "", now_str, 100])
-        except Exception:
-            res = None
+        # bridge.get_account_posts (sort: posts) সমস্ত কমিউনিটি পোস্ট নিয়ে আসে
+        params = {
+            "account": HIVE_USERNAME,
+            "sort": "posts",
+            "limit": 100
+        }
+        if start_author and start_permlink:
+            params["start_author"] = start_author
+            params["start_permlink"] = start_permlink
 
-        if not res:
-            params = {"tag": HIVE_USERNAME, "limit": 100}
-            if start_author and start_permlink:
-                params["start_author"] = start_author
-                params["start_permlink"] = start_permlink
-            try:
-                res = rpc("condenser_api.get_discussions_by_blog", params)
-            except Exception:
-                break
-
-        if not res:
+        res = rpc("bridge.get_account_posts", params)
+        if not res or not isinstance(res, list) or len(res) == 0:
             break
 
         batch = res[1:] if (start_author and start_permlink) else res
@@ -158,7 +152,7 @@ def get_posts():
                 break
 
             seen.add(pid)
-            body_html, thumb = format_body_and_thumbnail(p.get("body", ""), p.get("json_metadata", "{}"))
+            body_html, thumb = format_body_and_thumbnail(p.get("body", ""), p.get("json_metadata", {}))
             posts.append({
                 "id": pid,
                 "title": p.get("title", "").strip(),
