@@ -9,21 +9,53 @@ SEREY_POSTING_KEY = os.environ.get("SEREY_POSTING_KEY")
 
 QUEUE_FILE = "posts_queue.json"
 INDEX_FILE = "current_index.txt"
-HIVE_NODE = "https://api.hive.blog"
+
+# একাধিক ব্যাকআপ নোড (একটি কাজ না করলে অন্যটি স্বয়ংক্রিয়ভাবে কাজ করবে)
+HIVE_NODES = [
+    "https://api.openhive.network",
+    "https://api.deathwing.me",
+    "https://api.hive.blog",
+    "https://rpc.ecency.com"
+]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
+def call_hive_api(method, params):
+    """নোড ফেইলওভার সহ Hive API কল করা"""
+    payload = {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+        "id": 1
+    }
+    for node in HIVE_NODES:
+        try:
+            res = requests.post(node, json=payload, headers=HEADERS, timeout=15)
+            data = res.json()
+            if "result" in data and data["result"] is not None:
+                return data["result"]
+            elif "error" in data:
+                print(f"[{node}] API Error: {data['error'].get('message', 'Unknown error')}")
+        except Exception as e:
+            continue
+    return None
 
 def get_posts_from_one_year_ago():
-    """Hive থেকে ১ বছর পুরোনো থেকে শুরু করে সব পোস্টের তালিকা তৈরি"""
-    print("Hive থেকে ১ বছর পুরোনো পোস্ট স্ক্যান করা হচ্ছে...")
+    """Hive/Ecency থেকে aburihan1 এর পোস্ট সংগ্রহ করা"""
+    print(f"Hive থেকে @{HIVE_USERNAME} এর পোস্ট স্ক্যান করা হচ্ছে...")
+    
+    # আপনি চাইলে সব পোস্ট নিতে পারেন অথবা ১ বছরের ফিল্টার রাখতে পারেন
     one_year_ago = datetime.now(timezone.utc) - timedelta(days=365)
     
     all_posts = []
     start_author = None
     start_permlink = None
     
-    while True:
-        # প্যারামিটারে null না পাঠিয়ে সঠিকভাবে কুয়েরি তৈরি করা
+    for _ in range(10):  # সর্বোচ্চ ৫০০ পোস্ট পর্যন্ত চেক করবে
         params = {
-            "sort": "posts",
+            "sort": "blog",
             "account": HIVE_USERNAME,
             "limit": 50
         }
@@ -31,19 +63,7 @@ def get_posts_from_one_year_ago():
             params["start_author"] = start_author
             params["start_permlink"] = start_permlink
             
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "bridge.get_account_posts",
-            "params": params,
-            "id": 1
-        }
-        
-        try:
-            res = requests.post(HIVE_NODE, json=payload, timeout=20).json()
-            posts = res.get("result", [])
-        except Exception as e:
-            print(f"API Error: {e}")
-            break
+        posts = call_hive_api("bridge.get_account_posts", params)
         
         if not posts:
             break
@@ -52,24 +72,26 @@ def get_posts_from_one_year_ago():
         if not current_batch:
             break
             
-        reached_end = False
         for post in current_batch:
+            # শুধুমাত্র নিজের করা পোস্ট নেওয়া (অন্যের রি-ব্লগ বাদ দেওয়া)
+            if post.get("author") != HIVE_USERNAME:
+                continue
+                
             created_str = post.get("created", "")
-            created_at = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            try:
+                created_at = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
             
-            # ১ বছর পুরোনো থেকে আজকের পোস্টগুলো নেওয়া
-            if created_at >= one_year_ago:
-                all_posts.append({
-                    "author": post["author"],
-                    "permlink": post["permlink"],
-                    "created": post["created"],
-                    "title": post.get("title", "")
-                })
-            else:
-                reached_end = True
-                break
+            # পোস্ট তালিকায় যুক্ত করা
+            all_posts.append({
+                "author": post["author"],
+                "permlink": post["permlink"],
+                "created": post["created"],
+                "title": post.get("title", "")
+            })
         
-        if reached_end or len(posts) < 50:
+        if len(posts) < 50:
             break
             
         last_post = posts[-1]
@@ -81,12 +103,12 @@ def get_posts_from_one_year_ago():
     
     if all_posts:
         with open(QUEUE_FILE, "w", encoding="utf-8") as f:
-            json.dump(all_posts, f, indent=4)
+            json.dump(all_posts, f, indent=4, ensure_ascii=False)
         with open(INDEX_FILE, "w") as f:
             f.write("0")
         print(f"লিস্ট তৈরি সম্পন্ন! মোট পোস্ট পাওয়া গেছে: {len(all_posts)} টি।")
     else:
-        print("কোনো পোস্ট পাওয়া যায়নি। ইউজারনেম চেক করুন।")
+        print(f"কোনো পোস্ট পাওয়া যায়নি। ইউজারনেম (@{HIVE_USERNAME}) সঠিক আছে কি না নিশ্চিত করুন।")
         
     return all_posts
 
@@ -104,22 +126,13 @@ def update_index(index):
         f.write(str(index))
 
 def get_full_post(author, permlink):
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "bridge.get_post",
-        "params": {"author": author, "permlink": permlink},
-        "id": 1
-    }
-    try:
-        return requests.post(HIVE_NODE, json=payload, timeout=20).json().get("result")
-    except:
-        return None
+    return call_hive_api("bridge.get_post", {"author": author, "permlink": permlink})
 
 def post_to_serey(title, body, tags):
     """সেরিতে পোস্ট পাঠানোর ফাংশন"""
     print(f"সেরিতে পোস্ট পাঠানো হচ্ছে: {title}")
     
-    footer = f"\n\n---\n*মূল উৎস: [Hive Blog](https://hive.blog/@{HIVE_USERNAME})*"
+    footer = f"\n\n---\n*মূল উৎস: [Hive/Ecency Blog](https://ecency.com/@{HIVE_USERNAME})*"
     content_body = body + footer
 
     # এখানে সেরিতে ব্রডকাস্ট হবে
@@ -128,7 +141,6 @@ def post_to_serey(title, body, tags):
 
 def run():
     posts = []
-    # যদি লিস্ট ফাইল না থাকে অথবা ফাইল খালি থাকে
     if os.path.exists(QUEUE_FILE):
         with open(QUEUE_FILE, "r", encoding="utf-8") as f:
             try:
@@ -146,11 +158,11 @@ def run():
     index = get_current_index()
 
     if index >= len(posts):
-        print("সবগুলো ১ বছর পুরোনো পোস্ট সেরিতে পাঠানো সম্পন্ন হয়েছে!")
+        print("সবগুলো পোস্ট সেরিতে পাঠানো সম্পন্ন হয়েছে!")
         return
 
     target = posts[index]
-    print(f"পোস্ট নম্বর {index + 1}/{len(posts)} প্রসেস হচ্ছে (তারিখ: {target['created']})")
+    print(f"পোস্ট নম্বর {index + 1}/{len(posts)} প্রসেস হচ্ছে (শিরোনাম: {target.get('title')})")
 
     post_data = get_full_post(target["author"], target["permlink"])
     if post_data:
@@ -160,7 +172,7 @@ def run():
             update_index(index + 1)
             print(f"পরবর্তী ১২ ঘণ্টা পর পোস্ট নং {index + 2} যাবে।")
     else:
-        print("Hive থেকে পোস্টের কনটেন্ট লোড করা যায়নি।")
+        print("Hive থেকে পোস্টের বিস্তারিত কনটেন্ট লোড করা যায়নি।")
 
 if __name__ == "__main__":
     run()
