@@ -4,7 +4,7 @@ import requests
 import re
 import random
 import string
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from beem import Steem
 
 HIVE_USERNAME = "aburihan1"
@@ -14,11 +14,11 @@ SEREY_POSTING_KEY = os.environ.get("SEREY_POSTING_KEY")
 QUEUE_FILE = "posts_queue.json"
 INDEX_FILE = "current_index.txt"
 
-# Hive ব্যাকআপ নোড তালিকা
+# একাধিক অ্যাক্টিভ Hive RPC নোড
 HIVE_NODES = [
+    "https://api.hive.blog",
     "https://api.openhive.network",
     "https://api.deathwing.me",
-    "https://api.hive.blog",
     "https://rpc.ecency.com"
 ]
 
@@ -32,80 +32,64 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-def call_hive_api(method, params):
-    """Hive API থেকে ডেটা আনা"""
+def fetch_hive_posts():
+    """Hive/Ecency থেকে aburihan1 এর সমস্ত পোস্ট (কমিউনিটি পোস্ট সহ) আনা"""
+    print(f"Hive থেকে @{HIVE_USERNAME} এর সমস্ত পোস্ট সংগ্রহ করা হচ্ছে...")
+    
+    # এই মেথডটি সব ধরনের কমিউনিটি পোস্ট খুঁজে নিয়ে আসে
     payload = {
         "jsonrpc": "2.0",
-        "method": method,
-        "params": params,
+        "method": "condenser_api.get_discussions_by_author_before_date",
+        "params": [HIVE_USERNAME, "", "2099-01-01T00:00:00", 50],
         "id": 1
     }
+    
+    posts_data = None
     for node in HIVE_NODES:
         try:
             res = requests.post(node, json=payload, headers=HEADERS, timeout=15)
             data = res.json()
-            if "result" in data and data["result"] is not None:
-                return data["result"]
+            if "result" in data and isinstance(data["result"], list) and len(data["result"]) > 0:
+                posts_data = data["result"]
+                print(f"[{node}] থেকে সফলভাবে কানেক্ট হয়েছে!")
+                break
         except Exception:
             continue
-    return None
 
-def get_posts_from_one_year_ago():
-    """Hive/Ecency থেকে aburihan1 এর পোস্ট সংগ্রহ করা"""
-    print(f"Hive থেকে @{HIVE_USERNAME} এর পোস্ট স্ক্যান করা হচ্ছে...")
-    
+    if not posts_data:
+        print("কোনো নোড থেকে পোস্ট পাওয়া যায়নি।")
+        return []
+
     all_posts = []
-    start_author = None
-    start_permlink = None
-    
-    for _ in range(10):  # সর্বোচ্চ ৫০০ পোস্ট পর্যন্ত চেক করবে
-        params = {
-            "sort": "blog",
-            "account": HIVE_USERNAME,
-            "limit": 50
-        }
-        if start_author and start_permlink:
-            params["start_author"] = start_author
-            params["start_permlink"] = start_permlink
+    for post in posts_data:
+        # শুধুমাত্র aburihan1 এর নিজের তৈরি পোস্ট নেওয়া
+        if post.get("author") != HIVE_USERNAME:
+            continue
             
-        posts = call_hive_api("bridge.get_account_posts", params)
-        if not posts:
-            break
-            
-        current_batch = posts[1:] if (start_author and start_permlink) else posts
-        if not current_batch:
-            break
-            
-        for post in current_batch:
-            if post.get("author") != HIVE_USERNAME:
-                continue
-                
-            all_posts.append({
-                "author": post["author"],
-                "permlink": post["permlink"],
-                "created": post.get("created", ""),
-                "title": post.get("title", "")
-            })
-        
-        if len(posts) < 50:
-            break
-            
-        last_post = posts[-1]
-        start_author = last_post["author"]
-        start_permlink = last_post["permlink"]
+        all_posts.append({
+            "author": post["author"],
+            "permlink": post["permlink"],
+            "title": post.get("title", ""),
+            "body": post.get("body", ""),
+            "json_metadata": post.get("json_metadata", "{}"),
+            "created": post.get("created", "")
+        })
 
-    # পুরোনো থেকে নতুনের ক্রমানুসারে সাজানো
+    # পুরোনো থেকে নতুনের ক্রমানুসারে সাজানো (Oldest first)
     all_posts.reverse()
-    
+
     if all_posts:
         with open(QUEUE_FILE, "w", encoding="utf-8") as f:
             json.dump(all_posts, f, indent=4, ensure_ascii=False)
         with open(INDEX_FILE, "w") as f:
             f.write("0")
-        print(f"লিস্ট তৈরি সম্পন্ন! মোট পোস্ট পাওয়া গেছে: {len(all_posts)} টি।")
+        print(f"✅ সফল! মোট {len(all_posts)} টি পোস্ট পাওয়া গেছে।")
+        print("\nখুঁজে পাওয়া সাম্প্রতিক কিছু পোস্টের শিরোনাম:")
+        for i, p in enumerate(all_posts[-5:], 1):
+            print(f"  {i}. {p['title']}")
     else:
-        print(f"কোনো পোস্ট পাওয়া যায়নি। ইউজারনেম (@{HIVE_USERNAME}) চেক করুন।")
-        
+        print("কোনো পোস্ট তালিকায় যুক্ত করা যায়নি।")
+
     return all_posts
 
 def get_current_index():
@@ -121,12 +105,9 @@ def update_index(index):
     with open(INDEX_FILE, "w") as f:
         f.write(str(index))
 
-def get_full_post(author, permlink):
-    return call_hive_api("bridge.get_post", {"author": author, "permlink": permlink})
-
 def post_to_serey(title, body, tags):
     """beem ব্যবহার করে সরাসরি Serey ব্লকচেইনে পোস্ট পাঠানো"""
-    print(f"সেরিতে পোস্ট পাঠানো হচ্ছে: {title}")
+    print(f"\nসেরিতে পোস্ট পাঠানোর প্রস্তুতি: {title}")
     
     if not SEREY_POSTING_KEY:
         print("❌ এরর: SEREY_POSTING_KEY পাওয়া যায়নি! GitHub Secrets চেক করুন।")
@@ -135,13 +116,13 @@ def post_to_serey(title, body, tags):
     footer = f"\n\n---\n*মূল উৎস: [Hive/Ecency Blog](https://ecency.com/@{HIVE_USERNAME})*"
     content_body = body + footer
 
-    # সেরির জন্য ইউনিক পারমালিংক তৈরি করা
+    # সেরির পারমালিংক তৈরি
     clean_title = re.sub(r'[^a-zA-Z0-9\s-]', '', title).strip().lower()
     slug = re.sub(r'[\s-]+', '-', clean_title)
     rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
     permlink = f"{slug}-{rand_suffix}" if slug else f"post-{rand_suffix}"
 
-    # ট্যাগ ফিল্টার করা
+    # ট্যাগ প্রক্রিয়াকরণ
     valid_tags = []
     if isinstance(tags, list):
         for t in tags:
@@ -152,14 +133,12 @@ def post_to_serey(title, body, tags):
         valid_tags = ["bengali", "hive", "serey"]
 
     try:
-        # Serey ব্লকচেইনে কানেক্ট করা
+        # Serey ব্লকচেইনে ট্রানজাকশন পাঠানো
         stm = Steem(
             node=SEREY_NODES,
             keys=[SEREY_POSTING_KEY],
             num_retries=3
         )
-        
-        # পোস্ট ব্রডকাস্ট করা
         stm.post(
             title=title,
             body=content_body,
@@ -184,7 +163,7 @@ def run():
                 posts = []
 
     if not posts:
-        posts = get_posts_from_one_year_ago()
+        posts = fetch_hive_posts()
 
     if not posts:
         print("পোস্টের তালিকা খালি রয়েছে।")
@@ -197,17 +176,24 @@ def run():
         return
 
     target = posts[index]
-    print(f"পোস্ট নম্বর {index + 1}/{len(posts)} প্রসেস হচ্ছে (শিরোনাম: {target.get('title')})")
+    print(f"\n--- পোস্ট নম্বর {index + 1}/{len(posts)} প্রসেস হচ্ছে ---")
+    print(f"শিরোনাম: {target.get('title')}")
+    print(f"মূল প্রকাশের তারিখ: {target.get('created')}")
 
-    post_data = get_full_post(target["author"], target["permlink"])
-    if post_data:
-        tags = post_data.get("json_metadata", {}).get("tags", ["bengali", "hive"])
-        success = post_to_serey(post_data["title"], post_data["body"], tags)
-        if success:
-            update_index(index + 1)
-            print(f"পরবর্তী ১২ ঘণ্টা পর পোস্ট নং {index + 2} যাবে।")
-    else:
-        print("Hive থেকে পোস্টের বিস্তারিত কনটেন্ট লোড করা যায়নি।")
+    # মেটাডাটা থেকে ট্যাগ নেওয়া
+    tags = ["bengali", "hive"]
+    raw_meta = target.get("json_metadata", "{}")
+    try:
+        meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+        if "tags" in meta and isinstance(meta["tags"], list):
+            tags = meta["tags"]
+    except Exception:
+        pass
+
+    success = post_to_serey(target["title"], target["body"], tags)
+    if success:
+        update_index(index + 1)
+        print(f">> পরবর্তী ১২ ঘণ্টা পর পোস্ট নং {index + 2} স্বয়ংক্রিয়ভাবে যাবে।")
 
 if __name__ == "__main__":
     run()
